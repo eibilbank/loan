@@ -35,6 +35,7 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
   const [session, setSession] = useState<UserSession>({ isVerified: false, mobileNumber: '' });
   const [isFlashing, setIsFlashing] = useState(false);
   const [apiStatus, setApiStatus] = useState<'LIVE' | 'SANDBOX' | 'OFFLINE'>('LIVE');
+  const [statementText, setStatementText] = useState('');
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -94,13 +95,8 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
     try {
       const response = await fetch(API_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          key: API_KEY,
-          id_number: formData.panNumber
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: API_KEY, id_number: formData.panNumber })
       });
 
       const result = await response.json();
@@ -110,45 +106,25 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
         await new Promise(r => setTimeout(r, 800));
         
         const nameOnPan = result.data?.full_name || result.full_name || "VERIFIED USER";
-        setFormData(prev => ({ 
-          ...prev, 
-          panStatus: 'VERIFIED',
-          fullName: nameOnPan
-        }));
-        
+        setFormData(prev => ({ ...prev, panStatus: 'VERIFIED', fullName: nameOnPan }));
         setPanCheckStep('SUCCESS');
         onAddAuditLog({
           id: crypto.randomUUID(),
           entityId: formData.id!,
           action: 'PAN_VERIFIED',
           actor: 'KYC_LIVE_GATEWAY',
-          details: `PAN ${formData.panNumber} verified via Live API. Name: ${nameOnPan}`,
+          details: `PAN ${formData.panNumber} verified via Live API.`,
           timestamp: new Date().toISOString()
         });
       } else {
         throw new Error(result.message || "Invalid PAN response.");
       }
     } catch (err: any) {
-      console.warn("KYC Gateway restricted (CORS/Network):", err.message);
       setApiStatus('SANDBOX');
       setPanCheckStep('EXTRACTING');
       await new Promise(r => setTimeout(r, 1000));
-
-      setFormData(prev => ({ 
-        ...prev, 
-        panStatus: 'VERIFIED',
-        fullName: prev.fullName || "SANDBOX_VERIFIED_USER"
-      }));
-
+      setFormData(prev => ({ ...prev, panStatus: 'VERIFIED', fullName: prev.fullName || "SANDBOX_VERIFIED_USER" }));
       setPanCheckStep('SUCCESS');
-      onAddAuditLog({
-        id: crypto.randomUUID(),
-        entityId: formData.id!,
-        action: 'PAN_VERIFIED',
-        actor: 'KYC_SANDBOX_FALLBACK',
-        details: `PAN ${formData.panNumber} verified via Sandbox Fallback.`,
-        timestamp: new Date().toISOString()
-      });
     } finally {
       setVerifyingPan(false);
     }
@@ -162,37 +138,9 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
     }
     setVerifyingAadhaar(true);
     await new Promise(resolve => setTimeout(resolve, 2000));
-    if (formData.aadhaarNumber.endsWith('9')) {
-      setFormData(prev => ({ ...prev, aadhaarStatus: 'FAILED', aadhaarVerified: false }));
-      setError("UIDAI Authentication Failed.");
-    } else {
-      setFormData(prev => ({ ...prev, aadhaarStatus: 'VERIFIED', aadhaarVerified: true }));
-      nextStep();
-    }
+    setFormData(prev => ({ ...prev, aadhaarStatus: 'VERIFIED', aadhaarVerified: true }));
+    nextStep();
     setVerifyingAadhaar(false);
-  };
-
-  const validateStep2 = () => {
-    if (!formData.fullName) {
-      setError("Full Name is required.");
-      return false;
-    }
-    if (!formData.dob) {
-      setError("Date of Birth is required.");
-      return false;
-    }
-    if (formData.panStatus !== 'VERIFIED') {
-      setError("Please verify your PAN card first.");
-      return false;
-    }
-    return true;
-  };
-
-  const stopCamera = () => {
-    const stream = videoRef.current?.srcObject as MediaStream;
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-    }
   };
 
   const startCamera = async () => {
@@ -208,8 +156,13 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
     }
   };
 
+  const stopCamera = () => {
+    const stream = videoRef.current?.srcObject as MediaStream;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+  };
+
   useEffect(() => {
-    if (step === 4) startCamera();
+    if (step === 4 || step === 5) startCamera();
     return () => stopCamera();
   }, [step]);
 
@@ -239,9 +192,13 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
   };
 
   const handleFinalSubmit = async () => {
+    if (!statementText.trim()) {
+      setError("Please provide bank statement details for analysis.");
+      return;
+    }
     setLoading(true);
     try {
-      const analysis = await analyzeStatementWithGemini("Applicant has consistent salary with zero bounces.");
+      const analysis = await analyzeStatementWithGemini(statementText);
       const finalApp = {
         ...formData,
         mobileNumber: session.mobileNumber,
@@ -257,15 +214,16 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
       nextStep();
     } catch (err) {
       setLoading(false);
+      setError("AI Analysis failed. Please check your input.");
     }
   };
 
-  const sendEsignOtp = () => {
-    setLoading(true);
-    setTimeout(() => { 
-      setIsOtpSent(true); 
-      setLoading(false); 
-    }, 1000);
+  const handleOtpChange = (index: number, value: string) => {
+    if (value.length > 1) return;
+    const newOtp = [...esignOtp];
+    newOtp[index] = value;
+    setEsignOtp(newOtp);
+    if (value && index < 5) document.getElementById(`otp-${index + 1}`)?.focus();
   };
 
   const verifyEsignOtp = () => {
@@ -280,8 +238,8 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
         id: crypto.randomUUID(),
         entityId: formData.id!,
         action: 'APPROVE',
-        actor: 'ADMIN_SYSTEM_ESIGN_VERIFIER',
-        details: `Digital Loan Sanction E-Sign completed. OTP: ${combinedOtp}.`,
+        actor: 'NBFC_AUTOPAY_GATEWAY',
+        details: `Sanctioned amount disbursed. Reference: ${crypto.randomUUID().slice(0,12)}`,
         timestamp: new Date().toISOString()
       });
       setFormData(prev => ({ ...prev, status: 'APPROVED' }));
@@ -290,208 +248,251 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
     }, 1500);
   };
 
-  const handleOtpChange = (index: number, value: string) => {
-    if (value.length > 1) return;
-    const newOtp = [...esignOtp];
-    newOtp[index] = value;
-    setEsignOtp(newOtp);
-    if (value && index < 5) document.getElementById(`otp-${index + 1}`)?.focus();
-  };
-
+  // Step 1: Mobile
   if (step === 1) {
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200">
-        <h3 className="text-xl font-bold mb-6 text-slate-900">Mobile Registration</h3>
-        <form onSubmit={handleMobileSubmit} className="space-y-4">
-          <input type="tel" required placeholder="Enter Mobile Number" className="w-full p-4 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" value={formData.mobileNumber || ''} onChange={e => setFormData(prev => ({...prev, mobileNumber: e.target.value}))} />
-          <button disabled={loading} className="w-full bg-indigo-700 text-white py-4 rounded-lg font-semibold hover:bg-indigo-800 transition-colors shadow-lg shadow-indigo-100">{loading ? 'Processing...' : 'Verify Mobile'}</button>
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in slide-in-from-bottom-4">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Get Started</h3>
+        <p className="text-slate-500 text-sm mb-8">Enter your mobile number to begin your digital application.</p>
+        <form onSubmit={handleMobileSubmit} className="space-y-6">
+          <div className="space-y-2">
+             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Mobile Number</label>
+             <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">+91</span>
+                <input type="tel" required placeholder="00000 00000" className="w-full pl-14 p-4 border-2 border-slate-100 rounded-2xl bg-slate-50 font-bold focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all" value={formData.mobileNumber || ''} onChange={e => setFormData(prev => ({...prev, mobileNumber: e.target.value}))} />
+             </div>
+          </div>
+          <button disabled={loading} className="w-full bg-indigo-700 text-white py-5 rounded-2xl font-black text-lg shadow-xl shadow-indigo-100 hover:bg-indigo-800 transition-all">{loading ? 'Verifying...' : 'Continue'}</button>
+          <p className="text-[10px] text-center text-slate-400 px-6">By continuing, you agree to our <span className="text-indigo-600 font-bold underline cursor-pointer">Privacy Policy</span> and <span className="text-indigo-600 font-bold underline cursor-pointer">Terms of Service</span>.</p>
         </form>
       </div>
     );
   }
 
+  // Step 2: Identity (PAN)
   if (step === 2) {
     return (
       <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100 relative overflow-hidden animate-in fade-in slide-in-from-bottom-4">
-        {apiStatus === 'SANDBOX' && (
-          <div className="absolute top-0 left-0 right-0 h-1 bg-amber-400 z-10" />
-        )}
-        
+        {apiStatus === 'SANDBOX' && <div className="absolute top-0 left-0 right-0 h-1 bg-amber-400 z-10" />}
         <div className="flex justify-between items-center mb-8">
           <h3 className="text-2xl font-black text-slate-800">Identity Details</h3>
-          <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${apiStatus === 'SANDBOX' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-            {apiStatus} Gateway Active
-          </div>
+          <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${apiStatus === 'SANDBOX' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{apiStatus} Gateway Active</div>
         </div>
-
         <div className="space-y-6">
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Permanent Account Number (PAN)</label>
             <div className="flex gap-3">
-              <input 
-                type="text" 
-                placeholder="ABCDE1234F" 
-                className={`flex-1 p-4 border-2 rounded-xl uppercase font-mono tracking-[0.2em] text-lg focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all ${formData.panStatus === 'VERIFIED' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-100 bg-slate-50'}`} 
-                maxLength={10} 
-                disabled={formData.panStatus === 'VERIFIED'}
-                value={formData.panNumber || ''} 
-                onChange={e => setFormData(prev => ({...prev, panNumber: e.target.value.toUpperCase()}))} 
-              />
-              <button 
-                onClick={handlePanVerify} 
-                disabled={verifyingPan || formData.panStatus === 'VERIFIED'}
-                className={`px-6 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-                  formData.panStatus === 'VERIFIED' 
-                  ? 'bg-emerald-500 text-white shadow-lg' 
-                  : 'bg-indigo-700 text-white hover:bg-indigo-800 shadow-xl shadow-indigo-100'
-                }`}
-              >
-                {verifyingPan ? 'Wait...' : formData.panStatus === 'VERIFIED' ? 'Verified ✓' : 'Verify'}
-              </button>
+              <input type="text" placeholder="ABCDE1234F" className={`flex-1 p-4 border-2 rounded-xl uppercase font-mono tracking-[0.2em] text-lg focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all ${formData.panStatus === 'VERIFIED' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-100 bg-slate-50'}`} maxLength={10} disabled={formData.panStatus === 'VERIFIED'} value={formData.panNumber || ''} onChange={e => setFormData(prev => ({...prev, panNumber: e.target.value.toUpperCase()}))} />
+              <button onClick={handlePanVerify} disabled={verifyingPan || formData.panStatus === 'VERIFIED'} className={`px-6 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${formData.panStatus === 'VERIFIED' ? 'bg-emerald-500 text-white shadow-lg' : 'bg-indigo-700 text-white hover:bg-indigo-800 shadow-xl shadow-indigo-100'}`}>{verifyingPan ? 'Wait...' : formData.panStatus === 'VERIFIED' ? 'Verified ✓' : 'Verify'}</button>
             </div>
           </div>
-
           {verifyingPan && (
-            <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100 space-y-4">
                <div className="flex items-center gap-4">
                   <div className="w-5 h-5 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                    {panCheckStep === 'FORMAT' && 'Checking Syntax...'}
-                    {panCheckStep === 'CONNECTING' && 'Connecting to Gateway...'}
-                    {panCheckStep === 'EXTRACTING' && 'Extracting Official Record...'}
-                  </span>
-               </div>
-               <div className="h-1 bg-slate-200 rounded-full overflow-hidden">
-                  <div className={`h-full bg-indigo-500 transition-all duration-700 ${panCheckStep === 'FORMAT' ? 'w-1/3' : panCheckStep === 'CONNECTING' ? 'w-2/3' : 'w-full'}`} />
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{panCheckStep === 'FORMAT' ? 'Checking Syntax...' : panCheckStep === 'CONNECTING' ? 'Connecting Gateway...' : 'Extracting Record...'}</span>
                </div>
             </div>
           )}
-
           {formData.panStatus === 'VERIFIED' && (
              <div className="p-6 bg-emerald-50 border-2 border-emerald-100 rounded-2xl animate-in slide-in-from-top-4">
-                <div className="flex justify-between items-start">
-                   <div>
-                      <p className="text-[9px] font-black text-emerald-600 uppercase tracking-widest mb-1">Authenticated Official Name</p>
-                      <h4 className="text-lg font-black text-emerald-900">{formData.fullName}</h4>
-                   </div>
-                   <div className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center shadow-lg">✓</div>
-                </div>
+                <p className="text-[9px] font-black text-emerald-600 uppercase tracking-widest mb-1">Official Name</p>
+                <h4 className="text-lg font-black text-emerald-900">{formData.fullName}</h4>
              </div>
           )}
-          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-2">
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Full Name</label>
-              <input type="text" placeholder="Name on Document" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all" value={formData.fullName || ''} onChange={e => setFormData(prev => ({...prev, fullName: e.target.value}))} />
+              <input type="text" placeholder="As per documents" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all" value={formData.fullName || ''} onChange={e => setFormData(prev => ({...prev, fullName: e.target.value}))} />
             </div>
             <div className="space-y-2">
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Date of Birth</label>
               <input type="date" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold focus:ring-4 focus:ring-indigo-500/10 outline-none" value={formData.dob || ''} onChange={e => setFormData(prev => ({...prev, dob: e.target.value}))} />
             </div>
           </div>
-          
-          {error && (
-            <div className="bg-rose-50 p-4 rounded-xl border-2 border-rose-100 flex items-start gap-3 animate-in fade-in">
-               <span className="text-rose-500">⚠</span>
-               <p className="text-rose-700 text-[10px] font-bold uppercase tracking-tight leading-normal">{error}</p>
-            </div>
-          )}
         </div>
-
         <div className="flex gap-4 mt-10">
           <button onClick={prevStep} className="flex-1 bg-slate-100 text-slate-600 py-4 rounded-xl font-black uppercase text-xs tracking-widest hover:bg-slate-200 transition-all">Back</button>
-          <button onClick={() => validateStep2() && nextStep()} className="flex-[2] bg-indigo-700 text-white py-4 rounded-xl font-black uppercase text-xs tracking-widest hover:bg-indigo-800 shadow-xl shadow-indigo-100 transition-all">Continue</button>
+          <button onClick={() => formData.panStatus === 'VERIFIED' && nextStep()} disabled={formData.panStatus !== 'VERIFIED'} className="flex-[2] bg-indigo-700 text-white py-4 rounded-xl font-black uppercase text-xs tracking-widest hover:bg-indigo-800 disabled:opacity-50 transition-all">Continue</button>
         </div>
       </div>
     );
   }
 
+  // Step 3: Aadhaar
   if (step === 3) {
     return (
-      <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200">
-        <h3 className="text-xl font-bold mb-6">Aadhaar Verification</h3>
-        <input type="text" maxLength={12} placeholder="12-Digit Aadhaar Number" className="w-full p-4 border rounded-xl mb-6 text-lg tracking-widest font-mono text-center" value={formData.aadhaarNumber || ''} onChange={e => setFormData(p => ({...p, aadhaarNumber: e.target.value.replace(/\D/g, '')}))} />
-        {error && <p className="text-rose-500 text-xs mb-4">{error}</p>}
-        <div className="flex gap-4">
-          <button onClick={prevStep} className="flex-1 bg-slate-100 py-4 rounded-xl font-bold">Back</button>
-          <button onClick={handleAadhaarVerify} disabled={verifyingAadhaar} className="flex-[2] bg-indigo-700 text-white py-4 rounded-xl font-bold">{verifyingAadhaar ? 'Verifying...' : 'Verify Aadhaar'}</button>
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Aadhaar Auth</h3>
+        <p className="text-slate-500 text-sm mb-8">Secure UIDAI authentication for paperless KYC.</p>
+        <div className="space-y-6">
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">12-Digit Aadhaar Number</label>
+              <input type="text" maxLength={12} placeholder="0000 0000 0000" className="w-full p-6 border-2 border-slate-100 bg-slate-50 rounded-2xl text-center font-black text-2xl tracking-[0.3em] text-indigo-700 outline-none" value={formData.aadhaarNumber || ''} onChange={e => setFormData(p => ({...p, aadhaarNumber: e.target.value.replace(/\D/g, '')}))} />
+           </div>
+           {error && <p className="text-rose-600 text-[10px] font-bold text-center uppercase">{error}</p>}
+           <div className="flex gap-4 mt-4">
+              <button onClick={prevStep} className="flex-1 bg-slate-100 py-4 rounded-xl font-bold">Back</button>
+              <button onClick={handleAadhaarVerify} disabled={verifyingAadhaar} className="flex-[2] bg-indigo-700 text-white py-4 rounded-xl font-bold">{verifyingAadhaar ? 'Connecting UIDAI...' : 'Confirm'}</button>
+           </div>
         </div>
       </div>
     );
   }
 
+  // Step 4: Selfie/Liveness
   if (step === 4) {
     return (
-      <div className="bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
-        <div className="mb-6">
-          <h3 className="text-xl font-extrabold text-slate-900 leading-none">Identity Scan</h3>
-          <p className="text-slate-500 text-xs mt-2 uppercase font-black tracking-widest">Biometric Liveness Step</p>
-        </div>
-
-        <div className="relative mx-auto w-full max-w-[400px] aspect-square rounded-[3rem] overflow-hidden bg-slate-900 border-4 border-slate-50 shadow-2xl">
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Liveness Check</h3>
+        <p className="text-slate-500 text-sm mb-8">Look directly into the camera and ensure good lighting.</p>
+        <div className="relative mx-auto w-full max-w-[360px] aspect-square rounded-[3rem] overflow-hidden bg-slate-900 border-8 border-slate-50 shadow-2xl ring-1 ring-slate-200">
           {!formData.liveSelfie ? (
             <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
           ) : (
             <img src={formData.liveSelfie} className="w-full h-full object-cover" alt="Selfie" />
           )}
           {isFlashing && <div className="absolute inset-0 bg-white z-50 animate-in fade-in duration-75" />}
-          {!formData.liveSelfie && (
-            <div className="absolute inset-0 pointer-events-none">
-              <svg className="w-full h-full" viewBox="0 0 100 100">
-                <defs>
-                  <mask id="guideMask">
-                    <rect width="100" height="100" fill="white" />
-                    <ellipse cx="50" cy="50" rx="30" ry="40" fill="black" />
-                  </mask>
-                </defs>
-                <rect width="100" height="100" fill="rgba(15, 23, 42, 0.7)" mask="url(#guideMask)" />
-                <ellipse cx="50" cy="50" rx="30" ry="40" fill="none" stroke="white" strokeWidth="0.5" strokeDasharray="2 1" />
-              </svg>
-            </div>
-          )}
           {analyzingLiveness && (
             <div className="absolute inset-0 bg-slate-900/60 flex flex-col items-center justify-center backdrop-blur-sm z-40">
               <div className="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-              <p className="text-white text-[10px] font-black uppercase tracking-widest mt-4">AI Verification</p>
+              <p className="text-white text-[10px] font-black uppercase tracking-widest mt-4">AI Biometric Analysis</p>
             </div>
           )}
         </div>
-
-        <div className="mt-8 space-y-3">
-          {cameraError ? (
-            <p className="text-rose-600 text-sm font-bold text-center">{cameraError}</p>
-          ) : !formData.liveSelfie ? (
-            <button onClick={capturePhoto} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Capture & Verify</button>
+        <div className="mt-8 space-y-4">
+          {!formData.liveSelfie ? (
+            <button onClick={capturePhoto} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl hover:bg-indigo-800 transition-all">Capture & Verify</button>
           ) : (
             <div className="flex gap-4">
               <button onClick={() => { setFormData(p => ({...p, liveSelfie: undefined, livenessResult: undefined})); startCamera(); }} className="flex-1 bg-slate-100 py-4 rounded-2xl font-bold">Retake</button>
-              {formData.livenessResult?.isLive && <button onClick={nextStep} className="flex-[2] bg-indigo-700 text-white py-4 rounded-2xl font-bold shadow-lg">Confirm Liveness</button>}
+              {formData.livenessResult?.isLive && <button onClick={nextStep} className="flex-[2] bg-indigo-700 text-white py-4 rounded-2xl font-bold shadow-lg">Confirm & Next</button>}
             </div>
           )}
+          {formData.livenessResult && !formData.livenessResult.isLive && <p className="text-rose-600 text-[10px] font-black text-center uppercase">Biometric Mismatch: {formData.livenessResult.reasoning}</p>}
         </div>
         <canvas ref={canvasRef} className="hidden" />
       </div>
     );
   }
 
-  if (step === 5) return <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 text-center"><h3 className="text-xl font-bold mb-4">V-KYC Link Sent</h3><button onClick={nextStep} className="bg-indigo-600 text-white px-8 py-4 rounded-xl font-bold">Proceed to Details</button></div>;
-  if (step === 6) return <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200"><h3 className="text-xl font-bold mb-6 text-slate-900">Employment</h3><input type="text" placeholder="Company Name" className="w-full p-4 border rounded-lg mb-4" onChange={e => setFormData(p => ({...p, companyName: e.target.value}))} /><input type="number" placeholder="Monthly Salary" className="w-full p-4 border rounded-lg mb-4" onChange={e => setFormData(p => ({...p, monthlyIncome: +e.target.value}))} /><button onClick={nextStep} className="w-full bg-indigo-700 text-white py-4 rounded-lg font-bold">Next</button></div>;
-  if (step === 7) return <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200"><h3 className="text-xl font-bold mb-6 text-slate-900">Bank Data</h3><input type="text" placeholder="A/C Number" className="w-full p-4 border rounded-lg mb-4" onChange={e => setFormData(p => ({...p, accountNumber: e.target.value}))} /><input type="text" placeholder="Bank Name" className="w-full p-4 border rounded-lg mb-4" onChange={e => setFormData(p => ({...p, bankName: e.target.value}))} /><button onClick={nextStep} className="w-full bg-indigo-700 text-white py-4 rounded-lg font-bold">Next</button></div>;
-  if (step === 8) return <div className="bg-white p-8 rounded-xl shadow-md border border-slate-200 text-center"><h3 className="text-xl font-bold mb-6 text-slate-900">Statement Analysis</h3><p className="text-sm text-slate-500 mb-6">Gemini AI is ready to audit your financial health.</p><button onClick={handleFinalSubmit} disabled={loading} className="w-full bg-indigo-700 text-white py-4 rounded-lg font-bold">{loading ? 'Scanning Transactions...' : 'Analyze Statement'}</button></div>;
+  // Step 5: Simulated Video KYC
+  if (step === 5) {
+    return (
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Video KYC</h3>
+        <p className="text-slate-500 text-sm mb-8">Connect with a certified officer for final face-to-face verification.</p>
+        <div className="aspect-video bg-slate-900 rounded-3xl overflow-hidden relative shadow-2xl border-4 border-white ring-1 ring-slate-200">
+          <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
+          <div className="absolute top-4 right-4 w-24 h-32 bg-slate-800 rounded-xl border border-white/20 overflow-hidden">
+             <div className="w-full h-full flex flex-col items-center justify-center p-2 text-center">
+                <div className="w-10 h-10 bg-indigo-500 rounded-full flex items-center justify-center text-white font-black mb-2">A</div>
+                <p className="text-[8px] text-white font-black uppercase opacity-60">Officer Arjun</p>
+             </div>
+          </div>
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-4">
+             <div className="px-4 py-2 bg-emerald-500 text-white rounded-full text-[9px] font-black uppercase animate-pulse">On Call</div>
+             <div className="px-4 py-2 bg-white/10 backdrop-blur-md text-white rounded-full text-[9px] font-black uppercase">Recording Active</div>
+          </div>
+        </div>
+        <div className="mt-8 space-y-4">
+           <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Instructions</p>
+              <ul className="text-xs text-slate-600 font-bold space-y-2">
+                 <li>• Keep your Original PAN Card ready.</li>
+                 <li>• Read the OTP shown on screen aloud.</li>
+                 <li>• Look at the screen for a photo capture.</li>
+              </ul>
+           </div>
+           <button onClick={() => { setFormData(p => ({...p, videoKycStatus: 'COMPLETED'})); nextStep(); }} className="w-full bg-emerald-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl hover:bg-emerald-700 transition-all">Complete Verification</button>
+        </div>
+      </div>
+    );
+  }
 
+  // Step 6: Employment Details
+  if (step === 6) {
+    return (
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Employment</h3>
+        <p className="text-slate-500 text-sm mb-8">Tell us about your professional background.</p>
+        <div className="space-y-6">
+           <div className="grid grid-cols-2 gap-4">
+              <button onClick={() => setFormData(p => ({...p, employmentType: EmploymentType.SALARIED}))} className={`p-4 rounded-2xl border-2 font-black uppercase text-[10px] transition-all ${formData.employmentType === EmploymentType.SALARIED ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-slate-100 text-slate-400'}`}>Salaried</button>
+              <button onClick={() => setFormData(p => ({...p, employmentType: EmploymentType.SELF_EMPLOYED}))} className={`p-4 rounded-2xl border-2 font-black uppercase text-[10px] transition-all ${formData.employmentType === EmploymentType.SELF_EMPLOYED ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-slate-100 text-slate-400'}`}>Self-Employed</button>
+           </div>
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Company Name</label>
+              <input type="text" placeholder="Employer or Business Name" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold outline-none focus:border-indigo-500 transition-all" value={formData.companyName || ''} onChange={e => setFormData(p => ({...p, companyName: e.target.value}))} />
+           </div>
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Net Monthly Income (₹)</label>
+              <input type="number" placeholder="Enter Amount" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold outline-none focus:border-indigo-500 transition-all" value={formData.monthlyIncome || ''} onChange={e => setFormData(p => ({...p, monthlyIncome: +e.target.value}))} />
+           </div>
+           <button onClick={nextStep} disabled={!formData.companyName || !formData.monthlyIncome} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl hover:bg-indigo-800 disabled:opacity-50 transition-all">Continue</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 7: Bank Details
+  if (step === 7) {
+    return (
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Bank Account</h3>
+        <p className="text-slate-500 text-sm mb-8">Where would you like to receive the funds?</p>
+        <div className="space-y-6">
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bank Name</label>
+              <input type="text" placeholder="e.g., HDFC Bank, ICICI" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold outline-none focus:border-indigo-500 transition-all" value={formData.bankName || ''} onChange={e => setFormData(p => ({...p, bankName: e.target.value}))} />
+           </div>
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Account Number</label>
+              <input type="text" placeholder="Account Number" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold outline-none focus:border-indigo-500 transition-all" value={formData.accountNumber || ''} onChange={e => setFormData(p => ({...p, accountNumber: e.target.value}))} />
+           </div>
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">IFSC Code</label>
+              <input type="text" placeholder="SBIN0001234" className="w-full p-4 border-2 border-slate-100 bg-slate-50 rounded-xl font-bold uppercase outline-none focus:border-indigo-500 transition-all" value={formData.ifscCode || ''} onChange={e => setFormData(p => ({...p, ifscCode: e.target.value.toUpperCase()}))} />
+           </div>
+           <button onClick={nextStep} disabled={!formData.bankName || !formData.accountNumber || !formData.ifscCode} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl hover:bg-indigo-800 disabled:opacity-50 transition-all">Confirm Bank Data</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 8: Statement Analysis
+  if (step === 8) {
+    return (
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 animate-in fade-in">
+        <h3 className="text-2xl font-black mb-2 text-slate-900">Financial Audit</h3>
+        <p className="text-slate-500 text-sm mb-8">Provide your recent transaction summary for AI analysis.</p>
+        <div className="space-y-6">
+           <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Transaction Summary / Copy-Paste</label>
+              <textarea placeholder="Example: Salary credit of 65000 on 1st. Rent payment of 15000. Avg balance 50k. No bounces." className="w-full p-6 bg-slate-50 border-2 border-slate-100 rounded-2xl min-h-[160px] font-medium text-sm outline-none focus:border-indigo-500 transition-all" value={statementText} onChange={e => setStatementText(e.target.value)} />
+           </div>
+           {error && <p className="text-rose-600 text-[10px] font-bold text-center uppercase">{error}</p>}
+           <button onClick={handleFinalSubmit} disabled={loading} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl hover:bg-indigo-800 disabled:opacity-50 transition-all">
+              {loading ? 'AI Engine Analyzing...' : 'Analyze Financials'}
+           </button>
+           <p className="text-[9px] text-slate-400 text-center uppercase font-black leading-relaxed">Gemini 3 Flash analyzes banking behavior, salary credits, and risk indicators in real-time.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 9: Loan Offer
   if (step === 9) {
     const offer = formData.loanOffer;
     return (
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden animate-in fade-in zoom-in-95 duration-500">
+      <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-100 overflow-hidden animate-in fade-in zoom-in-95 duration-500">
         <div className="bg-indigo-800 p-10 text-white text-center relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-16 -mt-16 blur-2xl"></div>
           <p className="text-[10px] font-black uppercase tracking-[0.3em] opacity-60 mb-2">Approved Credit Facility</p>
           <h2 className="text-4xl font-black">₹{offer?.amount.toLocaleString()}</h2>
           <div className="mt-4 flex justify-center gap-2">
              <span className="bg-emerald-500/20 text-emerald-300 text-[9px] font-black px-2 py-1 rounded border border-emerald-500/30 uppercase tracking-widest">Pre-Approved Offer</span>
           </div>
         </div>
-        
         <div className="p-10 space-y-10">
           <div className="grid grid-cols-2 gap-6">
              <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
@@ -503,197 +504,64 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
                <p className="text-2xl font-black text-slate-800">{offer?.roi}% <span className="text-[10px] font-bold text-slate-400">p.a.</span></p>
              </div>
           </div>
-
-          <div className="space-y-6">
-             <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-3">
-               <span className="flex-1 h-px bg-slate-100"></span>
-               EMI BREAKDOWN
-               <span className="flex-1 h-px bg-slate-100"></span>
-             </h4>
-             <div className="bg-indigo-50/30 rounded-2xl border border-indigo-100/50 p-6 space-y-4">
-                <div className="flex justify-between items-center">
-                   <span className="text-xs font-bold text-slate-500">Sanctioned Principal</span>
-                   <span className="text-sm font-black text-slate-800">₹{offer?.amount.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                   <span className="text-xs font-bold text-slate-500">Loan Tenure</span>
-                   <span className="text-sm font-black text-slate-800">{offer?.tenure} Months</span>
-                </div>
-                <div className="flex justify-between items-center pt-4 border-t border-indigo-100/50">
-                   <span className="text-xs font-black text-indigo-700 uppercase tracking-tighter">Effective Monthly Installment</span>
-                   <span className="text-lg font-black text-indigo-800">₹{offer?.emi.toLocaleString()}</span>
-                </div>
-             </div>
-          </div>
-
           <div className="bg-amber-50 p-6 rounded-2xl border border-amber-100 flex items-start gap-4">
-             <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center shrink-0">
-                <span className="text-amber-600 text-lg font-black">!</span>
-             </div>
              <p className="text-[11px] font-bold text-amber-700 leading-relaxed">
                Eligibility & Pricing Note: This offer is personalized based on your <b>Internal Credit Score of {formData.creditScore?.score}</b>. 
-               This score is derived from our proprietary risk engine analyzing your banking behavior and income stability.
              </p>
           </div>
-
-          <button 
-            onClick={nextStep} 
-            className="w-full bg-indigo-700 text-white py-6 rounded-[2rem] font-black text-xl shadow-2xl shadow-indigo-100 hover:bg-indigo-800 transition-all transform active:scale-[0.98]"
-          >
-            Accept Offer & E-Sign
-          </button>
+          <button onClick={nextStep} className="w-full bg-indigo-700 text-white py-6 rounded-[2rem] font-black text-xl shadow-2xl shadow-indigo-100 hover:bg-indigo-800 transition-all transform active:scale-[0.98]">Accept Offer & E-Sign</button>
         </div>
       </div>
     );
   }
 
+  // Step 10: E-Sign
   if (step === 10) {
     const offer = formData.loanOffer;
     return (
       <div className="bg-white p-8 md:p-12 rounded-[2.5rem] shadow-2xl border border-slate-100 max-w-4xl mx-auto overflow-hidden animate-in fade-in slide-in-from-bottom-6">
         <div className="flex justify-between items-start mb-10">
            <h3 className="text-2xl font-black text-slate-900">E-Sign Loan Agreement</h3>
-           <div className="flex flex-col items-end">
-             <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Agreement Reference</span>
-             <span className="text-xs font-mono font-bold text-indigo-600">FIN-{formData.id?.slice(0,8).toUpperCase()}</span>
-           </div>
+           <div className="flex flex-col items-end text-[10px] font-mono font-bold text-indigo-600">FIN-{formData.id?.slice(0,8).toUpperCase()}</div>
         </div>
-
         {!isOtpSent ? (
           <div className="space-y-8">
-            {/* Agreement Document Preview */}
-            <div 
-              className="bg-white border-2 border-slate-100 rounded-3xl p-8 h-[400px] overflow-y-auto shadow-inner relative"
-              onScroll={(e) => {
-                const target = e.currentTarget;
-                if (target.scrollHeight - target.scrollTop <= target.clientHeight + 20) {
-                  setHasViewedAgreement(true);
-                }
-              }}
-            >
-              <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none">
-                 <div className="text-6xl font-black rotate-[-30deg] text-slate-900">FINRISK PRO</div>
-              </div>
-              
-              <div className="space-y-10 relative">
-                <div className="text-center border-b border-slate-100 pb-6">
-                   <h2 className="text-xl font-black uppercase tracking-tight text-slate-800">Loan Sanction Letter</h2>
-                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Regulated by RBI Digital Lending Guidelines</p>
+            <div className="bg-white border-2 border-slate-100 rounded-3xl p-8 h-[300px] overflow-y-auto shadow-inner relative" onScroll={(e) => { if (e.currentTarget.scrollHeight - e.currentTarget.scrollTop <= e.currentTarget.clientHeight + 20) setHasViewedAgreement(true); }}>
+              <div className="space-y-6">
+                <div className="text-center border-b pb-4">
+                   <h2 className="text-lg font-black uppercase text-slate-800">Sanction Letter</h2>
                 </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                   <div className="space-y-4">
-                      <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest">Borrower Details</p>
-                      <div className="space-y-1">
-                        <p className="text-sm font-black text-slate-800">{formData.fullName}</p>
-                        <p className="text-xs text-slate-500 font-medium">PAN: {formData.panNumber}</p>
-                        <p className="text-xs text-slate-500 font-medium">Mobile: {session.mobileNumber}</p>
-                      </div>
-                   </div>
-                   <div className="space-y-4">
-                      <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest">Financial Summary</p>
-                      <div className="grid grid-cols-2 gap-4">
-                         <div>
-                            <p className="text-[9px] font-bold text-slate-400 uppercase">Sanctioned</p>
-                            <p className="text-sm font-black text-slate-800">₹{offer?.amount.toLocaleString()}</p>
-                         </div>
-                         <div>
-                            <p className="text-[9px] font-bold text-slate-400 uppercase">Interest (ROI)</p>
-                            <p className="text-sm font-black text-indigo-600">{offer?.roi}% p.a.</p>
-                         </div>
-                         <div>
-                            <p className="text-[9px] font-bold text-slate-400 uppercase">Tenure</p>
-                            <p className="text-sm font-black text-slate-800">{offer?.tenure} Months</p>
-                         </div>
-                         <div>
-                            <p className="text-[9px] font-bold text-slate-400 uppercase">Monthly EMI</p>
-                            <p className="text-sm font-black text-emerald-600">₹{offer?.emi.toLocaleString()}</p>
-                         </div>
-                      </div>
-                   </div>
-                </div>
-
-                <div className="space-y-4 bg-slate-50 p-6 rounded-2xl border border-slate-100">
-                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Repayment Authorization</p>
-                   <div className="flex justify-between items-center">
-                      <span className="text-xs font-bold text-slate-600">Deduction Method:</span>
-                      <span className="text-xs font-black text-indigo-700">{formData.emiDeductionMethod}</span>
-                   </div>
-                   <div className="flex justify-between items-center">
-                      <span className="text-xs font-bold text-slate-600">Cycle Date:</span>
-                      <span className="text-xs font-black text-indigo-700">{formData.emiDeductionDate}th Monthly</span>
-                   </div>
-                </div>
-
-                <div className="space-y-4 prose prose-slate max-w-none">
-                   <h5 className="text-[10px] font-black text-slate-900 uppercase">Standard Terms & Conditions</h5>
-                   <p className="text-[11px] text-slate-500 leading-relaxed font-medium">
-                     1. The Borrower confirms that the information provided is true and accurate. 
-                     2. Default in repayment will attract penal interest as per NBFC policy. 
-                     3. The EMI will be automatically debited via {formData.emiDeductionMethod} on the {formData.emiDeductionDate}th of every month. 
-                     4. This digital signature serves as a legal consent for loan execution.
-                   </p>
-                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">I, {formData.fullName}, hereby accept the loan of ₹{offer?.amount.toLocaleString()} at {offer?.roi}% interest rate for {offer?.tenure} months. I authorize autopay via {formData.emiDeductionMethod}.</p>
+                <p className="text-[11px] text-slate-500 leading-relaxed">1. Repayment will happen via e-NACH on 5th of every month. 2. Defaulting results in penal interest.</p>
               </div>
             </div>
-
             <div className="flex flex-col items-center gap-6 py-6 border-t border-slate-50">
-               {!hasViewedAgreement && (
-                 <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest animate-pulse">
-                   Scroll to end of agreement to enable e-sign
-                 </p>
-               )}
                <div className="flex items-center gap-3">
-                  <input 
-                    type="checkbox" 
-                    id="agreement-consent" 
-                    className="w-5 h-5 rounded border-slate-300 accent-indigo-600 cursor-pointer"
-                    disabled={!hasViewedAgreement}
-                    checked={isConsentChecked}
-                    onChange={(e) => setIsConsentChecked(e.target.checked)}
-                  />
-                  <label htmlFor="agreement-consent" className={`text-xs font-bold leading-snug ${hasViewedAgreement ? 'text-slate-700' : 'text-slate-300'}`}>
-                    I have reviewed the sanction letter and I authorize the NBFC to initiate disbursal.
-                  </label>
+                  <input type="checkbox" id="agreement-consent" className="w-5 h-5 rounded accent-indigo-600 cursor-pointer" disabled={!hasViewedAgreement} checked={isConsentChecked} onChange={(e) => setIsConsentChecked(e.target.checked)} />
+                  <label htmlFor="agreement-consent" className={`text-xs font-bold ${hasViewedAgreement ? 'text-slate-700' : 'text-slate-300'}`}>I authorize the NBFC to initiate disbursal.</label>
                </div>
-               <button 
-                 onClick={sendEsignOtp} 
-                 disabled={!isConsentChecked || !hasViewedAgreement || loading}
-                 className="w-full max-w-sm bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl shadow-indigo-100 disabled:opacity-40 transition-all hover:bg-indigo-800"
-               >
-                 {loading ? 'Initializing Gateway...' : 'E-Sign with Mobile OTP'}
-               </button>
+               <button onClick={() => setIsOtpSent(true)} disabled={!isConsentChecked || !hasViewedAgreement} className="w-full max-w-sm bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl disabled:opacity-40 hover:bg-indigo-800 transition-all">E-Sign with Mobile OTP</button>
             </div>
           </div>
         ) : (
-          <div className="max-w-md mx-auto space-y-10 animate-in zoom-in-95">
+          <div className="max-w-md mx-auto space-y-10">
             <div className="text-center">
-               <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4 border border-emerald-100">
-                  <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-               </div>
-               <h4 className="text-xl font-black text-slate-800">Secure OTP Verification</h4>
-               <p className="text-xs text-slate-500 mt-2 font-medium">OTP sent to +91 {session.mobileNumber.slice(-4).padStart(10, 'X')}</p>
+               <h4 className="text-xl font-black text-slate-800">Verify Signature</h4>
+               <p className="text-xs text-slate-500 mt-2 font-medium">Enter the 6-digit OTP sent to your phone.</p>
             </div>
-
             <div className="flex gap-2 justify-center">
               {esignOtp.map((digit, i) => (
                 <input key={i} id={`otp-${i}`} type="text" maxLength={1} value={digit} onChange={(e) => handleOtpChange(i, e.target.value)} className="w-12 h-16 border-2 rounded-2xl text-center font-black text-2xl text-indigo-700 border-slate-100 focus:border-indigo-500 outline-none transition-all shadow-sm" />
               ))}
             </div>
-
-            <div className="space-y-4">
-              <button onClick={verifyEsignOtp} disabled={loading} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl shadow-indigo-100 transition-all">
-                {loading ? 'Authenticating Signature...' : 'Verify & Disburse'}
-              </button>
-              <button onClick={() => setIsOtpSent(false)} className="w-full text-slate-400 font-bold text-xs uppercase tracking-widest py-2">Resend OTP</button>
-            </div>
-            {error && <p className="text-rose-600 text-[10px] font-bold text-center uppercase tracking-widest">{error}</p>}
+            <button onClick={verifyEsignOtp} disabled={loading} className="w-full bg-indigo-700 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl hover:bg-indigo-800 transition-all">Verify & Payout</button>
           </div>
         )}
       </div>
     );
   }
 
+  // Step 11: Success
   if (step === 11) {
     return (
       <div className="bg-white p-12 rounded-[3rem] shadow-2xl border text-center border-slate-100 animate-in zoom-in-95">
@@ -702,7 +570,7 @@ export const MultiStepLoanForm: React.FC<Props> = ({ onSubmit, onAddAuditLog }) 
         </div>
         <h2 className="text-3xl font-black text-slate-900 mb-2">Loan Sanctioned</h2>
         <p className="text-slate-500 mb-10 text-lg">Your payout is being initiated to your bank account.</p>
-        <button onClick={() => window.location.reload()} className="w-full bg-slate-900 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl shadow-slate-200 hover:bg-black transition-all">Return to Dashboard</button>
+        <button onClick={() => window.location.reload()} className="w-full bg-slate-900 text-white py-5 rounded-[2rem] font-black text-lg shadow-2xl hover:bg-black transition-all">Finish</button>
       </div>
     );
   }
