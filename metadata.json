@@ -1,0 +1,7 @@
+{
+  "name": "FinRisk Pro - NBFC Loan System",
+  "description": "A production-grade loan application system featuring an internal credit risk scoring engine, Gemini AI-powered bank statement analysis, and a comprehensive admin control panel.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
